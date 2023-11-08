@@ -1,7 +1,4 @@
 #!/bin/bash
-
-source env/bin/activate
-
 #
 # Prune greedy
 #
