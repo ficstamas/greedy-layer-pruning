@@ -9,6 +9,8 @@ for task in "rte" "mrpc" "cola"; do
 for model in "bert-base-uncased" "roberta-base" "distilbert-base-uncased"; do
 for seed in `seq 0 1 4`; do
 python3 prune.py --model_name_or_path=$model \
+    --config_name=$model \
+    --tokenizer_name=$model \
     --task_name=$task \
     --dataset_name="glue" \
     --task_type="sequence" \
@@ -30,6 +32,8 @@ for task in "ner" "pos"; do
 for model in "bert-base-uncased" "roberta-base" "distilbert-base-uncased"; do
 for seed in `seq 0 1 4`; do
 python3 prune.py --model_name_or_path=$model \
+    --config_name=$model \
+    --tokenizer_name=$model \
     --task_name=$task \
     --dataset_name="conll2003" \
     --task_type="token" \
