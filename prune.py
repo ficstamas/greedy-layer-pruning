@@ -28,9 +28,10 @@ import torch
 from torch import nn
 from torch.nn import CrossEntropyLoss, MSELoss
 import torch.nn.functional as F
+import pandas as pd
 
 import numpy as np
-from datasets import load_dataset, load_metric
+from datasets import load_dataset, load_metric, Features, ClassLabel, Sequence
 
 import transformers
 from transformers.modeling_outputs import SequenceClassifierOutput
@@ -39,6 +40,7 @@ from transformers import (
     AutoModelForSequenceClassification,
     AutoTokenizer,
     DataCollatorWithPadding,
+    DataCollatorForTokenClassification,
     EvalPrediction,
     HfArgumentParser,
     PretrainedConfig,
@@ -52,6 +54,7 @@ from transformers.trainer_utils import get_last_checkpoint, is_main_process
 # Custom pruning models
 from models.model_factory import create_model
 from disable_checkpoint_handler import DisableCheckpointCallbackHandler
+import wandb
 
 task_to_keys = {
     "cola": ("sentence", None),
@@ -63,6 +66,8 @@ task_to_keys = {
     "sst2": ("sentence", None),
     "stsb": ("sentence1", "sentence2"),
     "wnli": ("sentence1", "sentence2"),
+    "ner": ("tokens", None),
+    "pos": ("tokens", None),
 }
 
 logger = logging.getLogger(__name__)
@@ -78,13 +83,20 @@ class DataTrainingArguments:
     into argparse arguments to be able to specify them on
     the command line.
     """
-
+    dataset_name: Optional[str] = field(
+        default="glue",
+        metadata={"help": "The name of the dataset to train on: " + ", ".join(task_to_keys.keys())},
+    )
     task_name: Optional[str] = field(
         default=None,
         metadata={"help": "The name of the task to train on: " + ", ".join(task_to_keys.keys())},
     )
+    task_type: Optional[str] = field(
+        default="sequence",
+        metadata={"help": "The type of the task to train on: " + ", ".join(task_to_keys.keys())},
+    )
     max_seq_length: int = field(
-        default=128,
+        default=256,
         metadata={
             "help": "The maximum total input sequence length after tokenization. Sequences longer "
             "than this will be truncated, sequences shorter will be padded."
@@ -112,9 +124,21 @@ class DataTrainingArguments:
         metadata={
             "help": "The maximum number of layers that is pruned afterwards. "
         },
+    ),
+    prune_all_but_one: bool = field(
+        default=True,
+        metadata={
+            "help": "Prune all but one layer"
+        },
     )
     prune_method: Optional[str] = field(
         default="greedy", metadata={"help": "Prune greedy in O(n^2) or perfect in O(n!)."}
+    )
+    wandb_project: Optional[str] = field(
+        default="greedy-layer-pruning", metadata={"help": "Wandb project name"}
+    )
+    wandb_entity: Optional[str] = field(
+        default="szegedai-semantics", metadata={"help": "Wandb entitry name"}
     )
 
     def __post_init__(self):
@@ -170,7 +194,6 @@ class ModelArguments:
 
 
 def main():
-
     if not os.path.exists("experiments/layer_files"):
         os.makedirs("experiments/layer_files")
 
@@ -184,7 +207,15 @@ def main():
         model_args, data_args, training_args = parser.parse_json_file(json_file=os.path.abspath(sys.argv[1]))
     else:
         model_args, data_args, training_args = parser.parse_args_into_dataclasses()
+    model_args.task_type = data_args.task_type
 
+    wandb.init(project=data_args.wandb_project, entity=data_args.wandb_entity, config={
+        "model_name": model_args.model_name_or_path,
+        "seed": training_args.seed,
+        "dataset_name": data_args.dataset_name,
+        "subset_name": data_args.task_name,
+        "task_type": data_args.task_type,
+    })
     # Detecting last checkpoint.
     last_checkpoint = None
     #training_args.output_dir = f"{training_args.output_dir}/{data_args.task_name}/{model_args.model_name_or_path}/{model_args.prune_method}/{str(model_args.prune_n_layers)}/{str(training_args.seed)}"
@@ -238,7 +269,25 @@ def main():
     # download the dataset.
     if data_args.task_name is not None:
         # Downloading and loading a dataset from the hub.
-        datasets = load_dataset("glue", data_args.task_name, cache_dir=".cache/")
+        if data_args.dataset_name == "conll2003":
+            datasets = load_dataset(data_args.dataset_name)
+            for splits in datasets.keys():
+                ds = datasets[splits].add_column(name="label", column=datasets[splits][f"{data_args.task_name}_tags"])
+                feature_dict = {}
+                for key, item in ds.features.items():
+                    feature_dict[key] = item
+
+                feature_dict["label"] = Sequence(ClassLabel(
+                    num_classes=datasets[splits].features[f"{data_args.task_name}_tags"].feature.num_classes,
+                    names=datasets[splits].features[f"{data_args.task_name}_tags"].feature.names
+                ))
+                ds = ds.cast(Features(feature_dict))
+                datasets[splits] = ds
+        elif data_args.dataset_name == "glue":
+            datasets = load_dataset(data_args.dataset_name, data_args.task_name)
+            val = datasets['validation'].train_test_split(train_size=0.5, seed=0)
+            datasets['validation'] = val['train']
+            datasets['test'] = val['test']
     else:
         # Loading a dataset from your local files.
         # CSV/JSON training and evaluation files are needed.
@@ -274,7 +323,10 @@ def main():
     if data_args.task_name is not None:
         is_regression = data_args.task_name == "stsb"
         if not is_regression:
-            label_list = datasets["train"].features["label"].names
+            if data_args.dataset_name == "conll2003":
+                label_list = datasets["train"].features["label"].feature.names
+            else:
+                label_list = datasets["train"].features["label"].names
             num_labels = len(label_list)
         else:
             num_labels = 1
@@ -302,12 +354,15 @@ def main():
         revision=model_args.model_revision,
         use_auth_token=True if model_args.use_auth_token else None
     )
+
+    optional_tokenizer_kwargs = {} if "roberta" not in model_args.tokenizer_name else {"add_prefix_space": True}
     tokenizer = AutoTokenizer.from_pretrained(
         model_args.tokenizer_name if model_args.tokenizer_name else model_args.model_name_or_path,
         cache_dir=model_args.cache_dir,
         use_fast=model_args.use_fast_tokenizer,
         revision=model_args.model_revision,
         use_auth_token=True if model_args.use_auth_token else None,
+        **optional_tokenizer_kwargs
     )
 
     # Preprocessing the datasets
@@ -332,24 +387,8 @@ def main():
         padding = False
 
     # Some models have set the order of the labels to use, so let's make sure we do use it.
-    label_to_id = None
-    if (
-        config.label2id != PretrainedConfig(num_labels=num_labels).label2id
-        and data_args.task_name is not None
-        and not is_regression
-    ):
-        # Some have all caps in their config, some don't.
-        label_name_to_id = {k.lower(): v for k, v in model.config.label2id.items()}
-        if list(sorted(label_name_to_id.keys())) == list(sorted(label_list)):
-            label_to_id = {i: label_name_to_id[label_list[i]] for i in range(num_labels)}
-        else:
-            logger.warn(
-                "Your model seems to have been trained with labels, but they don't match the dataset: ",
-                f"model labels: {list(sorted(label_name_to_id.keys()))}, dataset labels: {list(sorted(label_list))}."
-                "\nIgnoring the model labels as a result.",
-            )
-    elif data_args.task_name is None and not is_regression:
-        label_to_id = {v: i for i, v in enumerate(label_list)}
+    label_to_id = {v: i for i, v in enumerate(label_list)}
+    config.label2id = label_to_id
 
     if data_args.max_seq_length > tokenizer.model_max_length:
         logger.warn(
@@ -366,21 +405,78 @@ def main():
         result = tokenizer(*args, padding=padding, max_length=max_seq_length, truncation=True)
 
         # Map labels to IDs (not necessary for GLUE tasks)
-        if label_to_id is not None and "label" in examples:
-            result["label"] = [label_to_id[l] for l in examples["label"]]
+        # if label_to_id is not None and "label" in examples:
+        #     result["label"] = [label_to_id[l] for l in examples["label"]]
         return result
 
-    datasets = datasets.map(preprocess_function, batched=True, load_from_cache_file=not data_args.overwrite_cache)
+    def preprocess_function_conll(examples):
+        kwargs = {
+            "padding": padding,
+            "max_length": max_seq_length,
+            "truncation": True
+        }
+        if "is_split_into_words" not in kwargs:
+            kwargs["is_split_into_words"] = True
+        tokenized_inputs = tokenizer(
+            examples["tokens"], **kwargs
+        )
 
-    train_dataset = datasets["train"]
+        """
+        wikiann: O (0), B-PER (1), I-PER (2), B-ORG (3), I-ORG (4), B-LOC (5), I-LOC (6).
+        conll:   O (0), B-PER (1), I-PER (2), B-ORG (3)  I-ORG (4), B-LOC (5), I-LOC (6), B-MISC (7), I-MISC (8)
+        model:   O (0), B-PER (3), I-PER (4), B-ORG (5), I-ORG (6), B-LOC (7), I-LOC (8), B-MISC (1), I-MISC (2).
+        """
+
+        labels = []
+        task = data_args.task_name
+
+        id2label = {i: v for i,v in enumerate(datasets['train'].features[f'{task}_tags'].feature.names)}
+        label2id = {v: k for k,v in id2label.items()}
+        if task == "ner":
+            if "B-PER" not in label2id:
+                label2id["B-PER"] = label2id["I-PER"]
+
+        data = [
+            [label2id[id2label[x]] for x in y]
+            for y in examples[f'label']
+        ]
+
+        for i, label in enumerate(data):
+            word_ids = tokenized_inputs.word_ids(batch_index=i)
+            previous_word_idx = None
+            label_ids = []
+            for word_idx in word_ids:
+                # Special tokens have a word id that is None. We set the label
+                # to -100 so they are automatically
+                # ignored in the loss function.
+                if word_idx is None:
+                    label_ids.append(-100)
+                # We set the label for the first token of each word.
+                elif word_idx != previous_word_idx:
+                    label_ids.append(label[word_idx])
+                # For the other tokens in a word, we set the label to either
+                # the current label or -100, depending on
+                # the label_all_tokens flag.
+                else:
+                    label_ids.append(label[word_idx] if False else -100)
+                previous_word_idx = word_idx
+
+            labels.append(label_ids)
+
+        tokenized_inputs["labels"] = labels
+        return tokenized_inputs
+
+    datasets = datasets.map(
+        preprocess_function if data_args.task_type == "sequence" else preprocess_function_conll,
+        batched=True, load_from_cache_file=not data_args.overwrite_cache,
+        remove_columns=["label"] if data_args.task_type == "token" else []
+    )
 
     # If the following line is uncommented, the dev set is used. Otherwise a 15% split of the training set is used.
     # eval_dataset = datasets["validation_matched" if data_args.task_name == "mnli" else "validation"]
 
-    train_size = int(len(train_dataset) * 0.85)
-    split_dataset = train_dataset.train_test_split(train_size=train_size, shuffle=True)
-    train_dataset = split_dataset["train"]
-    eval_dataset = split_dataset["test"]
+    train_dataset = datasets["train"]
+    eval_dataset = datasets["validation"]
 
     if data_args.task_name is not None or data_args.test_file is not None:
         test_dataset = datasets["test_matched" if data_args.task_name == "mnli" else "test"]
@@ -391,7 +487,12 @@ def main():
 
     # Get the metric function
     if data_args.task_name is not None:
-        metric = load_metric("glue", data_args.task_name)
+        if data_args.dataset_name == "glue":
+            metric = load_metric("glue", data_args.task_name)
+        elif data_args.dataset_name == "conll2003":
+            metric = load_metric("seqeval")
+        else:
+            metric = load_metric("accuracy")
     # TODO: When datasets metrics include regular accuracy, make an else here and remove special branch from
     # compute_metrics
 
@@ -410,9 +511,36 @@ def main():
         else:
             return {"accuracy": (preds == p.label_ids).astype(np.float32).mean().item()}
 
+    def compute_metrics_conll(p):
+        id2label = config.id2label
+        predictions, labels = p
+        predictions = np.argmax(predictions, axis=2)
+
+        # Remove ignored index (special tokens)
+        true_predictions = [
+            [id2label[p] for (p, l) in zip(prediction, label) if l != -100]
+            for prediction, label in zip(predictions, labels)
+        ]
+        true_labels = [
+            [id2label[l] for (p, l) in zip(prediction, label) if l != -100]
+            for prediction, label in zip(predictions, labels)
+        ]
+
+        results = metric.compute(predictions=true_predictions, references=true_labels)
+        return {
+            "precision": results["overall_precision"],
+            "recall": results["overall_recall"],
+            "f1": results["overall_f1"],
+            "accuracy": results["overall_accuracy"],
+        }
+        return results
+
     # Data collator will default to DataCollatorWithPadding, so we change it if we already did the padding.
     if data_args.pad_to_max_length:
-        data_collator = default_data_collator
+        if data_args.task_type == "sequence":
+            data_collator = default_data_collator
+        else:
+            data_collator = DataCollatorForTokenClassification(tokenizer=tokenizer)
     elif training_args.fp16:
         data_collator = DataCollatorWithPadding(tokenizer, pad_to_multiple_of=8)
     else:
@@ -421,11 +549,12 @@ def main():
     # Create pruning strategy
     prune_fn = prune_greedy if data_args.prune_method == "greedy" else prune_optimal
     prune_fn(config, data_args, model_args, training_args, train_dataset,
-            eval_dataset, compute_metrics, tokenizer, data_collator, datasets)
+             eval_dataset, test_dataset, compute_metrics if data_args.task_type == "sequence" else compute_metrics_conll,
+             tokenizer, data_collator, datasets)
 
 
 def prune_optimal(config, data_args, model_args, training_args, train_dataset,
-    eval_dataset, compute_metrics, tokenizer, data_collator, datasets):
+                  eval_dataset, compute_metrics, tokenizer, data_collator, datasets):
     num_layers = data_args.prune_n_layers
     all_layers = [i for i in range(config.num_hidden_layers)]
     file_rows = []
@@ -456,14 +585,14 @@ def prune_optimal(config, data_args, model_args, training_args, train_dataset,
         f.writelines("%s\n" % l for l in file_rows)
 
 
-
 def prune_greedy(config, data_args, model_args, training_args, train_dataset,
-    eval_dataset, compute_metrics, tokenizer, data_collator, datasets):
+                 eval_dataset, test_dataset, compute_metrics, tokenizer, data_collator, datasets):
 
     finally_pruned_layers = []
     cache_dict = {}
-    num_iterations = min(data_args.prune_n_layers, config.num_hidden_layers-1)
-    while(len(finally_pruned_layers) < num_iterations):
+    num_iterations = min(data_args.prune_n_layers, config.num_hidden_layers-1) if not data_args.prune_all_but_one else config.num_hidden_layers - 1
+    table = {"dev": [], "test": [], "pruned": []}
+    while len(finally_pruned_layers) < num_iterations:
         layer_ids = [i for i in range(config.num_hidden_layers) if i not in finally_pruned_layers]
         lower_layer = 0
         upper_layer = len(layer_ids)-1
@@ -471,8 +600,10 @@ def prune_greedy(config, data_args, model_args, training_args, train_dataset,
 
         for i in range(0, len(layer_ids)):
             print("\n####")
-            cache_dict = evaluate_model(cache_dict, layer_ids[i], finally_pruned_layers, config, model_args, data_args,
-                training_args, train_dataset, eval_dataset, compute_metrics, tokenizer, data_collator, datasets)
+            cache_dict = evaluate_model(
+                cache_dict, layer_ids[i], finally_pruned_layers, config, model_args, data_args,
+                training_args, train_dataset, eval_dataset, test_dataset, compute_metrics, tokenizer, data_collator, datasets
+            )
             print(cache_dict)
 
         # Log result for later analysis
@@ -481,27 +612,41 @@ def prune_greedy(config, data_args, model_args, training_args, train_dataset,
 
         layer_to_prune = -1
         for key in cache_dict.keys():
-            if(layer_to_prune < 0 or cache_dict[key] >= cache_dict[layer_to_prune]):
+            if layer_to_prune < 0 or cache_dict[key][0] >= cache_dict[layer_to_prune][0]:
                 layer_to_prune = key
 
-        cache_dict = {}
+        eval_score, test_score = cache_dict[layer_to_prune]
+
         finally_pruned_layers.append(layer_to_prune)
+        wandb.log({
+            f"progress_eval": eval_score,
+            "num_layers": config.num_hidden_layers - len(finally_pruned_layers)
+        })
+        wandb.log({
+            f"progress_test": test_score,
+            "num_layers": config.num_hidden_layers - len(finally_pruned_layers)
+        })
+        table["dev"].append(eval_score)
+        table["test"].append(test_score)
+        table["pruned"].append(layer_to_prune)
+
+        cache_dict = {}
         print("PRUNED LAYER %s" % finally_pruned_layers)
 
+    wandb.log({"progress_table": wandb.Table(dataframe=pd.DataFrame(data=table))})
     # DONE - store into file
     with open(f'experiments/layer_files/{model_args.model_name_or_path}_{data_args.task_name}_greedy.txt', 'w') as f:
         f.writelines("%s\n" % l for l in finally_pruned_layers)
 
 
-
 def evaluate_model(cache_dict, layer_id, finally_pruned_layers, config, model_args, data_args,
-    training_args, train_dataset, eval_dataset, compute_metrics, tokenizer, data_collator,
-    datasets):
+                   training_args, train_dataset, eval_dataset, test_dataset, compute_metrics, tokenizer, data_collator,
+                   datasets):
 
     # Set seed before initializing model.
     set_seed(training_args.seed)
 
-    if(layer_id in cache_dict):
+    if layer_id in cache_dict:
         print("Layer %d from cache: %.4f" % (layer_id, cache_dict[layer_id]))
         return cache_dict[layer_id]
 
@@ -550,17 +695,38 @@ def evaluate_model(cache_dict, layer_id, finally_pruned_layers, config, model_ar
 
     # res = eval_results.get("eval_loss", None)
     res = None
-    res = res or eval_results.get("eval_f1", None)
     res = res or eval_results.get("eval_accuracy", None)
+    res = res or eval_results.get("eval_f1", None)
     res = res or eval_results.get("eval_spearmanr", None)
     res = res or eval_results.get("eval_matthews_correlation", None)
 
     res = round(res, 3)
 
-    if(res == None):
-        raise Exception("Now performance metric found!")
+    if res is None:
+        raise Exception("New performance metric found!", eval_result)
 
-    cache_dict[layer_id] = res
+    # Evaluation
+    test_results = {}
+    logger.info("*** Evaluate Test set ***")
+
+    # Loop to handle MNLI double evaluation (matched, mis-matched)
+    tasks = [data_args.task_name]
+    test_datasets = [test_dataset]
+
+    for ts, task in zip(test_datasets, tasks):
+        test_result = trainer.evaluate(eval_dataset=ts)
+        test_results.update(test_result)
+
+    # res = eval_results.get("eval_loss", None)
+    test = None
+    test = test or test_results.get("eval_accuracy", None)
+    test = test or test_results.get("eval_f1", None)
+    test = test or test_results.get("eval_spearmanr", None)
+    test = test or test_results.get("eval_matthews_correlation", None)
+
+    test = round(test, 3)
+
+    cache_dict[layer_id] = [res, test]
     return cache_dict
 
 

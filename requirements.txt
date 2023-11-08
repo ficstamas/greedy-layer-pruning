@@ -8,3 +8,6 @@ pandas
 datasets
 guildai
 scikit-learn
+seqeval
+accelerate
+wandb
