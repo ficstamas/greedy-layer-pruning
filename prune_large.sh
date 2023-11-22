@@ -3,7 +3,7 @@
 # Prune greedy
 #
 for seed in `seq 0 1 4`; do
-for model in "bert-base-uncased" "roberta-base"; do
+for model in "distilbert-base-uncased" "bert-large-uncased"; do
 for task in "mrpc" "cola"; do
 python3 prune.py --model_name_or_path=$model \
     --config_name=$model \
@@ -26,7 +26,7 @@ done
 done
 
 for seed in `seq 0 1 4`; do
-for model in "bert-base-uncased" "roberta-base"; do
+for model in "distilbert-base-uncased" "bert-large-uncased"; do
 for task in "ner" "pos"; do
 python3 prune.py --model_name_or_path=$model \
     --config_name=$model \
