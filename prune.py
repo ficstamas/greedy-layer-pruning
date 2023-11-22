@@ -70,6 +70,15 @@ task_to_keys = {
     "pos": ("tokens", None),
 }
 
+task_to_metric = {
+    "cola": "matthews_correlation",
+    "mrpc": "f1",
+    "rte": "accuracy",
+    "sst2": "accuracy",
+    "ner": "f1",
+    "pos": "f1",
+}
+
 logger = logging.getLogger(__name__)
 
 
@@ -208,6 +217,8 @@ def main():
     else:
         model_args, data_args, training_args = parser.parse_args_into_dataclasses()
     model_args.task_type = data_args.task_type
+
+    training_args.group_by_length = True
 
     wandb.init(project=data_args.wandb_project, entity=data_args.wandb_entity, config={
         "model_name": model_args.model_name_or_path,
@@ -402,7 +413,7 @@ def main():
         args = (
             (examples[sentence1_key],) if sentence2_key is None else (examples[sentence1_key], examples[sentence2_key])
         )
-        result = tokenizer(*args, padding=padding, max_length=max_seq_length, truncation=True)
+        result = tokenizer(*args, padding=True, max_length=max_seq_length, truncation=True)
 
         # Map labels to IDs (not necessary for GLUE tasks)
         # if label_to_id is not None and "label" in examples:
@@ -695,10 +706,10 @@ def evaluate_model(cache_dict, layer_id, finally_pruned_layers, config, model_ar
 
     # res = eval_results.get("eval_loss", None)
     res = None
-    res = res or eval_results.get("eval_accuracy", None)
     res = res or eval_results.get("eval_f1", None)
     res = res or eval_results.get("eval_spearmanr", None)
     res = res or eval_results.get("eval_matthews_correlation", None)
+    res = res or eval_results.get("eval_accuracy", None)
 
     res = round(res, 3)
 
@@ -719,10 +730,10 @@ def evaluate_model(cache_dict, layer_id, finally_pruned_layers, config, model_ar
 
     # res = eval_results.get("eval_loss", None)
     test = None
-    test = test or test_results.get("eval_accuracy", None)
     test = test or test_results.get("eval_f1", None)
     test = test or test_results.get("eval_spearmanr", None)
     test = test or test_results.get("eval_matthews_correlation", None)
+    test = test or test_results.get("eval_accuracy", None)
 
     test = round(test, 3)
 
