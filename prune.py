@@ -50,6 +50,8 @@ from transformers import (
     set_seed,
 )
 from transformers.trainer_utils import get_last_checkpoint, is_main_process
+from torch import Tensor
+from typing import Dict
 
 # Custom pruning models
 from models.model_factory import create_model
@@ -80,6 +82,41 @@ task_to_metric = {
 }
 
 logger = logging.getLogger(__name__)
+
+
+def dynamic_padding_sequence_classification(batch: Dict[str, Tensor]) -> Dict[str, Tensor]:
+    features = ['input_ids', 'attention_mask', 'token_type_ids']
+    max_len = max([len(b['input_ids']) for b in batch])
+
+    batch = {key: [torch.tensor(batch[i][key]) for i in range(len(batch))] for key in batch[0].keys()}
+
+    b = {}
+    for f in features:
+        try:
+            b[f] = torch.stack([torch.nn.functional.pad(t, (0, max_len - t.shape[-1]), value=0) for t in batch[f]])
+        except KeyError:
+            continue
+    b['label'] = torch.stack(batch['label'])
+    return b
+
+
+def dynamic_padding_token_classification(batch: Dict[str, Tensor]) -> Dict[str, Tensor]:
+    features = ['input_ids', 'attention_mask', 'token_type_ids', 'labels']
+    max_len = max([len(b['input_ids']) for b in batch])
+
+    batch = {key: [torch.tensor(batch[i][key]) for i in range(len(batch))] for key in batch[0].keys()}
+    b = {}
+    for f in features:
+        try:
+            if f != 'label':
+                b[f] = torch.stack(
+                    [torch.nn.functional.pad(t, (0, max_len - t.shape[-1]), value=0) for t in batch[f]])
+            else:
+                b[f] = torch.stack(
+                    [torch.nn.functional.pad(t, (0, max_len - t.shape[-1]), value=-100) for t in batch[f]])
+        except KeyError:
+            continue
+    return b
 
 
 # See https://github1s.com/huggingface/transformers/blob/HEAD/src/transformers/training_args.py
@@ -550,9 +587,9 @@ def main():
     # Data collator will default to DataCollatorWithPadding, so we change it if we already did the padding.
     if data_args.pad_to_max_length:
         if data_args.task_type == "sequence":
-            data_collator = default_data_collator
+            data_collator = dynamic_padding_sequence_classification  # default_data_collator
         else:
-            data_collator = DataCollatorForTokenClassification(tokenizer=tokenizer)
+            data_collator = dynamic_padding_token_classification  # DataCollatorForTokenClassification(tokenizer=tokenizer)
     elif training_args.fp16:
         data_collator = DataCollatorWithPadding(tokenizer, pad_to_multiple_of=8)
     else:
