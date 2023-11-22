@@ -413,8 +413,8 @@ def main():
         args = (
             (examples[sentence1_key],) if sentence2_key is None else (examples[sentence1_key], examples[sentence2_key])
         )
-        result = tokenizer(*args, padding=True, max_length=max_seq_length, truncation=True)
-
+        result = tokenizer(*args, padding=False, max_length=max_seq_length, truncation=True)
+        result["length"] = [len(x) for x in result['input_ids']]
         # Map labels to IDs (not necessary for GLUE tasks)
         # if label_to_id is not None and "label" in examples:
         #     result["label"] = [label_to_id[l] for l in examples["label"]]
@@ -422,7 +422,7 @@ def main():
 
     def preprocess_function_conll(examples):
         kwargs = {
-            "padding": padding,
+            "padding": False,
             "max_length": max_seq_length,
             "truncation": True
         }
@@ -475,6 +475,7 @@ def main():
             labels.append(label_ids)
 
         tokenized_inputs["labels"] = labels
+        tokenized_inputs["length"] = [len(x) for x in tokenized_inputs['input_ids']]
         return tokenized_inputs
 
     datasets = datasets.map(
