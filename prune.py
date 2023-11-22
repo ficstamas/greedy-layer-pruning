@@ -96,7 +96,7 @@ def dynamic_padding_sequence_classification(batch: Dict[str, Tensor]) -> Dict[st
             b[f] = torch.stack([torch.nn.functional.pad(t, (0, max_len - t.shape[-1]), value=0) for t in batch[f]])
         except KeyError:
             continue
-    b['label'] = torch.stack(batch['label'])
+    b['labels'] = torch.stack(batch['label'])
     return b
 
 
