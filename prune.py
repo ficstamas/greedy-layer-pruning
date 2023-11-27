@@ -749,10 +749,10 @@ def evaluate_model(cache_dict, layer_id, finally_pruned_layers, config, model_ar
     res = res or eval_results.get("eval_matthews_correlation", None)
     res = res or eval_results.get("eval_accuracy", None)
 
-    res = round(res, 3)
-
     if res is None:
-        raise Exception("New performance metric found!", eval_result)
+        raise Exception("New performance metric found!", eval_results)
+
+    res = round(res, 3)
 
     # Evaluation
     test_results = {}
