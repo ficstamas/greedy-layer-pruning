@@ -776,6 +776,9 @@ def evaluate_model(cache_dict, layer_id, finally_pruned_layers, config, model_ar
     test = test or test_results.get("eval_matthews_correlation", None)
     test = test or test_results.get("eval_accuracy", None)
 
+    if test is None and "eval_matthews_correlation" in test_results:
+        test = eval_results.get("eval_matthews_correlation", None)
+
     test = round(test, 3)
 
     cache_dict[layer_id] = [res, test]
