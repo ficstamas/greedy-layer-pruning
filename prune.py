@@ -208,7 +208,6 @@ class ModelArguments:
     """
     Arguments pertaining to which model/config/tokenizer we are going to fine-tune from.
     """
-
     model_name_or_path: str = field(
         metadata={"help": "Path to pretrained model or model identifier from huggingface.co/models"}
     )
@@ -236,6 +235,9 @@ class ModelArguments:
             "help": "Will use the token generated when running `transformers-cli login` (necessary to use this script "
             "with private models)."
         },
+    )
+    metric_key: str = field(
+        default=None, metadata={"help": "Metric"}
     )
 
 
@@ -724,7 +726,7 @@ def evaluate_model(cache_dict, layer_id, finally_pruned_layers, config, model_ar
 
     # Training
     train_result = trainer.train(resume_from_checkpoint=None)
-    metrics = train_result.metrics
+    metric_name = model_args.metric_key
 
     # Evaluation
     eval_results = {}
@@ -744,16 +746,19 @@ def evaluate_model(cache_dict, layer_id, finally_pruned_layers, config, model_ar
 
     # res = eval_results.get("eval_loss", None)
     res = None
-    res = res or eval_results.get("eval_f1", None)
-    res = res or eval_results.get("eval_spearmanr", None)
-    res = res or eval_results.get("eval_matthews_correlation", None)
-    res = res or eval_results.get("eval_accuracy", None)
+    if metric_name is None:
+        res = res or eval_results.get("eval_f1", None)
+        res = res or eval_results.get("eval_spearmanr", None)
+        res = res or eval_results.get("eval_matthews_correlation", None)
+        res = res or eval_results.get("eval_accuracy", None)
 
-    if res is None and "eval_matthews_correlation" in eval_results:
-        res = eval_results.get("eval_matthews_correlation", None)
+        if res is None and "eval_matthews_correlation" in eval_results:
+            res = eval_results.get("eval_matthews_correlation", None)
 
-    if res is None:
-        raise Exception("New performance metric found!", eval_results)
+        if res is None:
+            raise Exception("New performance metric found!", eval_results)
+    else:
+        res = eval_results.get(f"eval_{metric_name}", None)
 
     res = round(res, 3)
 
@@ -770,14 +775,17 @@ def evaluate_model(cache_dict, layer_id, finally_pruned_layers, config, model_ar
         test_results.update(test_result)
 
     # res = eval_results.get("eval_loss", None)
-    test = None
-    test = test or test_results.get("eval_f1", None)
-    test = test or test_results.get("eval_spearmanr", None)
-    test = test or test_results.get("eval_matthews_correlation", None)
-    test = test or test_results.get("eval_accuracy", None)
+    if metric_name is None:
+        test = None
+        test = test or test_results.get("eval_f1", None)
+        test = test or test_results.get("eval_spearmanr", None)
+        test = test or test_results.get("eval_matthews_correlation", None)
+        test = test or test_results.get("eval_accuracy", None)
 
-    if test is None and "eval_matthews_correlation" in test_results:
-        test = eval_results.get("eval_matthews_correlation", None)
+        if test is None and "eval_matthews_correlation" in test_results:
+            test = eval_results.get("eval_matthews_correlation", None)
+    else:
+        test = eval_results.get(f"eval_{metric_name}", None)
 
     test = round(test, 3)
 
