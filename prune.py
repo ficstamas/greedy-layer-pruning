@@ -438,8 +438,9 @@ def main():
         padding = False
 
     # Some models have set the order of the labels to use, so let's make sure we do use it.
-    label_to_id = {v: i for i, v in enumerate(label_list)}
-    config.label2id = label_to_id
+    if not is_regression:
+        label_to_id = {v: i for i, v in enumerate(label_list)}
+        config.label2id = label_to_id
 
     if data_args.max_seq_length > tokenizer.model_max_length:
         logger.warn(
