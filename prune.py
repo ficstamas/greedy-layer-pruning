@@ -76,6 +76,7 @@ task_to_metric = {
     "cola": "matthews_correlation",
     "mrpc": "f1",
     "rte": "accuracy",
+    "stsb": "spearmanr",
     "sst2": "accuracy",
     "ner": "f1",
     "pos": "f1",
