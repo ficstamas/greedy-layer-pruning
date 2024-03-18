@@ -641,6 +641,8 @@ def prune_optimal(config, data_args, model_args, training_args, train_dataset,
 def prune_greedy(config, data_args, model_args, training_args, train_dataset,
                  eval_dataset, test_dataset, compute_metrics, tokenizer, data_collator, datasets):
 
+    normalized_model_name = "__".join(model_args.model_name_or_path.split("/"))
+
     finally_pruned_layers = []
     cache_dict = {}
     num_iterations = min(data_args.prune_n_layers, config.num_hidden_layers-1) if not data_args.prune_all_but_one else config.num_hidden_layers - 1
@@ -660,7 +662,7 @@ def prune_greedy(config, data_args, model_args, training_args, train_dataset,
             print(cache_dict)
 
         # Log result for later analysis
-        with open(f'experiments/layer_files/{model_args.model_name_or_path}_{data_args.task_name}_greedy_log.txt', 'a') as f:
+        with open(f'experiments/layer_files/{normalized_model_name}_{data_args.task_name}_greedy_log.txt', 'a') as f:
             f.writelines(f"{str(len(finally_pruned_layers))};{str(cache_dict)}\n")
 
         layer_to_prune = -1
@@ -688,7 +690,7 @@ def prune_greedy(config, data_args, model_args, training_args, train_dataset,
 
     wandb.log({"progress_table": wandb.Table(dataframe=pd.DataFrame(data=table))})
     # DONE - store into file
-    with open(f'experiments/layer_files/{model_args.model_name_or_path}_{data_args.task_name}_greedy.txt', 'w') as f:
+    with open(f'experiments/layer_files/{normalized_model_name}_{data_args.task_name}_greedy.txt', 'w') as f:
         f.writelines("%s\n" % l for l in finally_pruned_layers)
 
 
